@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Share Now</title>
+  <link rel="stylesheet" href="/static/css/style.css" />
+</head>
+<body>
+  <nav>
+    <div class="nav-container">
+      <div class="logo">Share Now</div>
+      <a href="#contact" class="con">Contact</a>
+    </div>
+  </nav>
+  
+  <!-- Overlay for popup -->
+  <div id="overlay" onclick="hideScanPopup()"></div>
+
+  <div id="main">
+    <div id="send">
+      <h1>Send File</h1>
+      <input type="file" id="fileInput" />
+      <div id="s1"><button onclick="uploadFile()">Upload</button></div>
+      <p id="codeDisplay"></p>
+    </div>
+    <div id="uploadPopup" style="display:none; position:fixed; top:50%; left:50%; transform:translate(-50%, -50%);
+background-color:#222; color:white; padding:20px; border-radius:8px; z-index:9999;">
+  please wait for a while...
+      <div id="progressContainer" style="margin-top: 10px; text-align: center;">
+    <svg id="progressCircle" width="100" height="100">
+      <circle cx="50" cy="50" r="45" stroke="#555" stroke-width="10" fill="none"/>
+      <circle id="progressBar" cx="50" cy="50" r="45" stroke="#4caf50" stroke-width="10" fill="none"
+              stroke-dasharray="282.6" stroke-dashoffset="282.6"/>
+      <text id="progressText" x="50%" y="55%" text-anchor="middle" font-size="16" fill="#fff">0%</text>
+    </svg>
+  </div>
+      <div id="successTick" style="display: none; margin-top: 10px;">
+    <svg width="60" height="60" viewBox="0 0 52 52">
+      <circle cx="26" cy="26" r="25" fill="none" stroke="#4CAF50" stroke-width="4"/>
+      <path fill="none" stroke="#4CAF50" stroke-width="4" d="M14 27l7 7 17-17"/>
+    </svg>
+  </div>
+</div>
+
+    <div id="Receive">
+      <h1>Receive File</h1>
+      <input type="text" id="codeInput" placeholder="Enter 6-digit code" />
+      <div id="r1"><button onclick="downloadFile()">Download</button></div>
+      <p id="codeDisplay"></p>
+    </div>
+  </div>
+
+  <!-- QR Code Popup -->
+  <div id="scan">
+    <div id="qrCodeSection">
+      <h2>QR Code</h2>
+      <img id="qrCodeImage" src="data:image/png;base64,..." alt="QR Code" />
+      <button id="shareBtn">Share QR Code</button>
+
+      <p>Transfer Code: <span id="transferCode"></span></p>
+      <button id="copyCodeButton" onclick="copyCode()">Copy Code</button>
+    </div>
+    <p id="expiryTime"></p>
+    <p id="encryptionMessage"></p>
+  </div>
+
+  <!--histroy-->
+  <div id="history">
+  <p>
+    <h2>History</h2><br>
+    Reload for getting the details
+  </p>
+  <table>
+    <thead>
+      <tr>
+        <th>Sender IP</th>
+        <th>Receiver IP</th>
+        <th>File</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for entry in history %}
+      <tr>
+        <td>{{ entry.sender_ip }}</td>
+        <td>{{ entry.receiver_ip }}</td>
+        <td class="history-filename">{{ entry.filename }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+
+  <!--footer-->
+  <div class="contact-container">
+    <div class="contact-footer" id="contact">
+      <h2>Contact Me</h2>
+      <form class="contact-form" id="contact-form">
+        <input type="text" name="name" placeholder="Your Name" required />
+        <input type="tel" name="phone" placeholder="Mobile Number" required />
+        <input type="email" name="email" placeholder="Email" required />
+        <textarea name="message" placeholder="Write your message here..." required></textarea>
+        <button type="submit">Submit</button>
+      </form>
+      <div id="response-message" style="margin-top: 10px; color: green;"></div>
+      <div class="end">Created by You.</div>
+    </div>
+  </div>
+
+  <script src="/static/js/script.js"></script>
+</body>
+</html>
