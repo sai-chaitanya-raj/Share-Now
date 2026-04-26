@@ -13,6 +13,7 @@ import qrcode
 from werkzeug.utils import secure_filename
 from pymongo import MongoClient
 from dotenv import load_dotenv
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -121,6 +122,55 @@ def start_cleanup_scheduler():
 
 # Start the cleanup scheduler
 start_cleanup_scheduler()
+
+# ---------------------------------------------------------------------------
+# Prometheus Metrics
+# ---------------------------------------------------------------------------
+REQUEST_COUNT = Counter(
+    'flask_http_requests_total',
+    'Total HTTP requests',
+    ['method', 'endpoint', 'status']
+)
+
+REQUEST_LATENCY = Histogram(
+    'flask_http_request_duration_seconds',
+    'HTTP request latency in seconds',
+    ['method', 'endpoint']
+)
+
+
+@app.before_request
+def _start_timer():
+    request._prom_start_time = time.time()
+
+
+@app.after_request
+def _record_metrics(response):
+    if request.path == '/metrics':  # Don't track the metrics endpoint itself
+        return response
+
+    latency = time.time() - getattr(request, '_prom_start_time', time.time())
+    endpoint = request.path
+
+    REQUEST_COUNT.labels(
+        method=request.method,
+        endpoint=endpoint,
+        status=response.status_code
+    ).inc()
+
+    REQUEST_LATENCY.labels(
+        method=request.method,
+        endpoint=endpoint
+    ).observe(latency)
+
+    return response
+
+
+@app.route('/metrics')
+def metrics():
+    """Prometheus metrics endpoint."""
+    return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+
 
 # ---------------------------------------------------------------------------
 # Routes
