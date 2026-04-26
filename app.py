@@ -17,7 +17,9 @@ from dotenv import load_dotenv
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-load_dotenv()
+# Only load .env file in local development (Railway sets env vars directly)
+if os.path.exists('.env'):
+    load_dotenv(dotenv_path='.env', override=False)
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-fallback-key')
