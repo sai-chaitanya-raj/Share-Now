@@ -1,13 +1,24 @@
-async function uploadFile() {
-    document.getElementById("uploadPopup").style.display = "block";
-    document.getElementById("progressContainer").style.display = "block"; // show progress circle
-    observeQRDisplay();  // to monitor QR visibility
+// ============================================
+// NowShare — Frontend Logic
+// ============================================
 
+// ---------------------------------------------------------------------------
+// Upload
+// ---------------------------------------------------------------------------
+async function uploadFile() {
     const fileInput = document.getElementById("fileInput");
+
+    // Validate BEFORE showing popup
     if (!fileInput.files.length) {
         alert("Please select a file to upload.");
         return;
     }
+
+    // Show upload popup with progress
+    document.getElementById("uploadPopup").style.display = "block";
+    document.getElementById("progressContainer").style.display = "block";
+    const successTick = document.getElementById("successTick");
+    if (successTick) successTick.style.display = "none";
 
     const formData = new FormData();
     formData.append("file", fileInput.files[0]);
@@ -24,20 +35,36 @@ async function uploadFile() {
             }
         });
 
-        xhr.onreadystatechange = async function () {
+        xhr.onreadystatechange = function () {
             if (xhr.readyState === 4) {
                 document.getElementById("uploadPopup").style.display = "none";
 
                 if (xhr.status === 200) {
-                    const data = JSON.parse(xhr.responseText);
-                    document.getElementById("transferCode").innerText = data.code;
-                    document.getElementById("qrCodeImage").src = data.qr_code_url;
-                    startCountdown(600); // Start 10-minute countdown
-                    updateHistory();
-                    showScanPopup();
+                    try {
+                        const data = JSON.parse(xhr.responseText);
+                        document.getElementById("transferCode").innerText = data.code;
+                        document.getElementById("qrCodeImage").src = data.qr_code_url;
+                        startCountdown(600); // 10-minute countdown
+                        updateHistory();
+                        showScanPopup();
+                    } catch (parseError) {
+                        alert("Upload succeeded but response was invalid.");
+                        console.error("Parse error:", parseError);
+                    }
                 } else {
-                    alert("Upload failed: " + xhr.responseText);
+                    let msg = "Upload failed.";
+                    try {
+                        const errData = JSON.parse(xhr.responseText);
+                        msg = errData.error || msg;
+                    } catch (_) {
+                        msg = xhr.responseText || msg;
+                    }
+                    alert(msg);
                 }
+
+                // Reset progress bar for next upload
+                document.getElementById("progressBar").style.strokeDashoffset = 282.6;
+                document.getElementById("progressText").textContent = "0%";
             }
         };
 
@@ -45,9 +72,13 @@ async function uploadFile() {
         xhr.send(formData);
     } catch (error) {
         alert("Upload failed: " + error);
+        document.getElementById("uploadPopup").style.display = "none";
     }
 }
 
+// ---------------------------------------------------------------------------
+// Download
+// ---------------------------------------------------------------------------
 async function downloadFile() {
     const code = document.getElementById("codeInput").value.trim();
     if (!code) {
@@ -55,14 +86,10 @@ async function downloadFile() {
         return;
     }
 
-    // Show popup with downloading message
+    // Show popup
     const popup = document.getElementById("uploadPopup");
-    const popupTextNode = popup.querySelector(".popup-message");
     const tickIcon = document.getElementById("successTick");
 
-    if (popupTextNode) {
-        popupTextNode.textContent = "Your file is being downloaded...";
-    }
     popup.style.display = "block";
     document.getElementById("progressContainer").style.display = "none";
     if (tickIcon) tickIcon.style.display = "none";
@@ -70,8 +97,14 @@ async function downloadFile() {
     try {
         const response = await fetch(`/download/${code}`);
         if (!response.ok) {
-            const errorText = await response.text();
-            alert("Error: " + errorText);
+            let errorMsg = "Invalid code or file expired.";
+            try {
+                const errData = await response.json();
+                errorMsg = errData.error || errorMsg;
+            } catch (_) {
+                errorMsg = await response.text() || errorMsg;
+            }
+            alert("Error: " + errorMsg);
             popup.style.display = "none";
             return;
         }
@@ -98,20 +131,20 @@ async function downloadFile() {
 
         await updateHistory();
 
-        // Update popup message to show success
-        if (popupTextNode) {
-            popupTextNode.textContent = "Your file has been downloaded";
-        }
+        // Show success
         if (tickIcon) {
-            tickIcon.style.display = "block";
+            tickIcon.style.display = "flex";
             tickIcon.classList.add("animate-tick");
         }
 
         // Auto-close popup after 3 seconds
         setTimeout(() => {
             popup.style.display = "none";
-            tickIcon.classList.remove("animate-tick");
-        }, 5000);
+            if (tickIcon) {
+                tickIcon.classList.remove("animate-tick");
+                tickIcon.style.display = "none";
+            }
+        }, 3000);
 
     } catch (error) {
         alert("Download failed: " + error);
@@ -119,29 +152,26 @@ async function downloadFile() {
     }
 }
 
-//update histroy
+// ---------------------------------------------------------------------------
+// History
+// ---------------------------------------------------------------------------
 async function updateHistory() {
     try {
         const res = await fetch("/get_history");
         const history = await res.json();
         const container = document.getElementById("historyContainer");
+        if (!container) return;
 
-        container.innerHTML = ""; // Clear the existing history content
+        container.innerHTML = "";
 
         if (history.length === 0) {
-            container.innerHTML = "No history available."; // Show message when there is no history
+            container.innerHTML = "<p style='text-align:center; color:#888;'>No history available.</p>";
+            return;
         }
 
         history.forEach(entry => {
             const div = document.createElement("div");
             div.className = "history-entry";
-
-            const isSender = entry.sender_ip === currentUserIp;
-            const isReceiver = entry.receiver_ip === currentUserIp;
-
-            const senderIp = isSender ? entry.sender_ip : 'Hidden';
-            const receiverIp = isReceiver ? entry.receiver_ip : 'Hidden';
-
             div.innerHTML = `
                 <strong>Sender IP:</strong> ${entry.sender_ip}<br>
                 <strong>Receiver IP:</strong> ${entry.receiver_ip || 'Pending'}<br>
@@ -154,17 +184,25 @@ async function updateHistory() {
     }
 }
 
-// Automatically update history on page load
-window.addEventListener("DOMContentLoaded", updateHistory);
-//his end
+// ---------------------------------------------------------------------------
+// Copy code
+// ---------------------------------------------------------------------------
 function copyCode() {
     const code = document.getElementById("transferCode").innerText;
-    navigator.clipboard.writeText(code);
-    const btn = document.getElementById("copyCodeButton");
-    btn.classList.add("copied");
-    setTimeout(() => btn.classList.remove("copied"), 1000);
+    if (!code) return;
+
+    navigator.clipboard.writeText(code).then(() => {
+        const btn = document.getElementById("copyCodeButton");
+        btn.classList.add("copied");
+        setTimeout(() => btn.classList.remove("copied"), 1000);
+    }).catch(err => {
+        console.error("Copy failed:", err);
+    });
 }
 
+// ---------------------------------------------------------------------------
+// QR popup show/hide
+// ---------------------------------------------------------------------------
 function showScanPopup() {
     document.getElementById("scan").style.display = "block";
     document.getElementById("overlay").style.display = "block";
@@ -175,7 +213,9 @@ function hideScanPopup() {
     document.getElementById("overlay").style.display = "none";
 }
 
-// Time countdown function
+// ---------------------------------------------------------------------------
+// Countdown timer
+// ---------------------------------------------------------------------------
 function startCountdown(durationInSeconds) {
     const expiryTimeElement = document.getElementById("expiryTime");
     let remaining = durationInSeconds;
@@ -193,93 +233,111 @@ function startCountdown(durationInSeconds) {
         remaining--;
     }, 1000);
 }
-//qr
-window.addEventListener('DOMContentLoaded', () => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const code = urlParams.get('code'); // Get 'code' from the URL parameters
-    if (code) {
-        const receiveInput = document.getElementById('codeInput'); // Get the input field by id
-        if (receiveInput) {
-            receiveInput.value = code; // Paste the code into the codeInput field
+
+// ---------------------------------------------------------------------------
+// QR code sharing (Web Share API)
+// ---------------------------------------------------------------------------
+function shareQRCode() {
+    const qrImg = document.getElementById('qrCodeImage');
+    const dataUrl = qrImg ? qrImg.src : '';
+
+    if (!dataUrl || !dataUrl.startsWith('data:image')) {
+        alert("QR Code not available yet. Upload a file first.");
+        return;
+    }
+
+    // Convert base64 data URL to Blob
+    try {
+        const byteString = atob(dataUrl.split(',')[1]);
+        const mimeString = dataUrl.split(',')[0].split(':')[1].split(';')[0];
+        const ab = new ArrayBuffer(byteString.length);
+        const ia = new Uint8Array(ab);
+        for (let i = 0; i < byteString.length; i++) {
+            ia[i] = byteString.charCodeAt(i);
         }
-    }
-});
-//popup mess
-function observeQRDisplay() {
-  const scanSection = document.getElementById("scan");
-  const popup = document.getElementById("uploadPopup");
+        const blob = new Blob([ab], { type: mimeString });
+        const file = new File([blob], 'qr-code.png', { type: 'image/png' });
 
-  const observer = new MutationObserver(() => {
-    const qrImage = document.getElementById("qrCodeImage");
-    if (qrImage && qrImage.src && qrImage.src.trim() !== "") {
-      popup.style.display = "none";
-      observer.disconnect();
+        if (navigator.canShare && navigator.canShare({ files: [file] })) {
+            navigator.share({
+                title: 'NowShare QR Code',
+                text: 'Scan this to download your file:',
+                files: [file],
+            }).catch(error => {
+                console.error('Sharing failed:', error);
+            });
+        } else {
+            alert('Sharing is not supported on this device/browser.');
+        }
+    } catch (error) {
+        console.error('Share error:', error);
+        alert('Could not share QR code.');
     }
-  });
-
-  observer.observe(scanSection, { childList: true, subtree: true });
 }
 
-//contact
+// ---------------------------------------------------------------------------
+// Contact form
+// ---------------------------------------------------------------------------
+function initContactForm() {
+    const form = document.getElementById('contact-form');
+    if (!form) return;
 
+    form.addEventListener('submit', async function (e) {
+        e.preventDefault();
 
-document.addEventListener('DOMContentLoaded', function () {
-  const form = document.getElementById('contact-form');
+        const formData = {
+            name: form.name.value,
+            phone: form.phone.value,
+            email: form.email.value,
+            message: form.message.value
+        };
 
-  form.addEventListener('submit', async function (e) {
-    e.preventDefault();
+        const responseMsg = document.getElementById('response-message');
 
-    const formData = {
-      name: form.name.value,
-      phone: form.phone.value,
-      email: form.email.value,
-      message: form.message.value
-    };
+        try {
+            const res = await fetch('/submit_contact', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(formData)
+            });
 
-    try {
-      const res = await fetch('/submit_contact', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(formData)
-      });
+            const result = await res.json();
+            responseMsg.innerText = result.message;
+            responseMsg.style.color = res.ok ? 'green' : 'red';
 
-      const result = await res.json();
-      document.getElementById('response-message').innerText = result.message;
-      form.reset();
-    } catch (err) {
-      document.getElementById('response-message').innerText = 'Submission failed.';
-    }
-  });
-});
-//share qr
-document.getElementById('shareBtn').addEventListener('click', () => {
-  const qrImg = document.getElementById('qrCodeImage');
-  const dataUrl = qrImg?.src;
-
-  if (!dataUrl) {
-    alert("QR Code not found!");
-    return;
-  }
-
-  fetch(dataUrl)
-    .then(res => res.blob())
-    .then(blob => {
-      const file = new File([blob], 'qr-code.png', { type: 'image/png' });
-
-      if (navigator.canShare && navigator.canShare({ files: [file] })) {
-        navigator.share({
-          title: 'NowShare QR Code',
-          text: 'Scan this to download your file:',
-          files: [file],
-        }).catch(error => {
-          console.error('Sharing failed:', error);
-          alert('Sharing canceled or failed.');
-        });
-      } else {
-        alert('Sharing is not supported on this device/browser.');
-      }
+            if (res.ok) form.reset();
+        } catch (err) {
+            responseMsg.innerText = 'Submission failed. Please try again.';
+            responseMsg.style.color = 'red';
+        }
     });
-});
+}
 
+// ---------------------------------------------------------------------------
+// Auto-fill code from QR scan URL
+// ---------------------------------------------------------------------------
+function autoFillCodeFromURL() {
+    const urlParams = new URLSearchParams(window.location.search);
+    const code = urlParams.get('code');
+    if (code) {
+        const receiveInput = document.getElementById('codeInput');
+        if (receiveInput) {
+            receiveInput.value = code;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Initialize on page load
+// ---------------------------------------------------------------------------
+document.addEventListener('DOMContentLoaded', function () {
+    updateHistory();
+    autoFillCodeFromURL();
+    initContactForm();
+
+    // Share button
+    const shareBtn = document.getElementById('shareBtn');
+    if (shareBtn) {
+        shareBtn.addEventListener('click', shareQRCode);
+    }
+});

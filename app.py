@@ -1,151 +1,309 @@
-from flask import Flask, render_template, request, jsonify, send_file
-import os, random, string
-from cryptography.fernet import Fernet
-import qrcode
+import os
+import random
+import string
+import logging
+import time
+import threading
 from io import BytesIO
 import base64
+
+from flask import Flask, render_template, request, jsonify, send_file
+from cryptography.fernet import Fernet
+import qrcode
 from werkzeug.utils import secure_filename
 from pymongo import MongoClient
+from dotenv import load_dotenv
+
+# ---------------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------------
+load_dotenv()
 
 app = Flask(__name__)
-client = MongoClient("mongodb://localhost:27017/") # Replace with your MongoDB connection string
-db = client["nowshare_db"]
-contact_collection = db["contacts"]
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-fallback-key')
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_FILE_SIZE_MB', 100)) * 1024 * 1024
 
+# Logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+)
+logger = logging.getLogger(__name__)
+
+# MongoDB
+MONGO_URI = os.environ.get('MONGO_URI')
+if MONGO_URI:
+    try:
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        db = client["nowshare_db"]
+        contact_collection = db["contacts"]
+        logger.info("MongoDB connected successfully.")
+    except Exception as e:
+        logger.warning(f"MongoDB connection failed: {e}. Contact form will be disabled.")
+        contact_collection = None
+else:
+    logger.warning("MONGO_URI not set. Contact form will be disabled.")
+    contact_collection = None
+
+# File storage
 UPLOAD_FOLDER = 'uploads'
-codes = {}
-keys = {}
-history = []  # To store the history temporarily
+FILE_EXPIRY_SECONDS = int(os.environ.get('FILE_EXPIRY_MINUTES', 10)) * 60
 
-if not os.path.exists(UPLOAD_FOLDER):
-    os.makedirs(UPLOAD_FOLDER)
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 
-def generate_key():
-    return Fernet.generate_key()
+# In-memory stores — NOTE: data is lost on restart.
+# For production at scale, use Redis or a database.
+codes = {}      # code -> { path, key, created_at, filename }
+history = []    # list of { sender_ip, receiver_ip, filename, created_at }
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def generate_code():
+    """Generate a unique 6-digit code, retrying on collision."""
+    for _ in range(100):
+        code = ''.join(random.choices(string.digits, k=6))
+        if code not in codes:
+            return code
+    # Extremely unlikely fallback
+    raise RuntimeError("Could not generate a unique code after 100 attempts")
+
 
 def generate_qr_code(code):
-    # Create the URL with the code as a query parameter
-    url_with_code = f"https://nowshare.onrender.com/?code={code}"
+    """Generate a QR code containing the download URL as a base64 data-URI."""
+    # Build the URL dynamically based on the current request
+    base_url = request.host_url.rstrip('/')
+    url_with_code = f"{base_url}/?code={code}"
 
-    # Generate QR code with the URL
     img = qrcode.make(url_with_code)
-
-    # Save the QR code image to a BytesIO object
     img_io = BytesIO()
     img.save(img_io, 'PNG')
     img_io.seek(0)
 
-    # Convert the image to base64 encoding
     img_base64 = base64.b64encode(img_io.getvalue()).decode('utf-8')
-
-    # Return the base64 string as a data URL
     return f"data:image/png;base64,{img_base64}"
+
+
+def cleanup_expired_files():
+    """Remove files and codes that have exceeded the expiry time."""
+    now = time.time()
+    expired_codes = [
+        c for c, info in codes.items()
+        if now - info['created_at'] > FILE_EXPIRY_SECONDS
+    ]
+    for c in expired_codes:
+        info = codes.pop(c, None)
+        if info and os.path.exists(info['path']):
+            try:
+                os.remove(info['path'])
+                logger.info(f"Expired file removed: {info['path']}")
+            except OSError as e:
+                logger.error(f"Failed to remove expired file {info['path']}: {e}")
+
+
+def start_cleanup_scheduler():
+    """Run cleanup every 60 seconds in a background thread."""
+    def _run():
+        while True:
+            time.sleep(60)
+            try:
+                cleanup_expired_files()
+            except Exception as e:
+                logger.error(f"Cleanup error: {e}")
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    logger.info(f"File cleanup scheduler started (expiry: {FILE_EXPIRY_SECONDS}s).")
+
+
+# Start the cleanup scheduler
+start_cleanup_scheduler()
+
+# ---------------------------------------------------------------------------
+# Routes
+# ---------------------------------------------------------------------------
 
 @app.route('/')
 def index():
     return render_template('index.html', history=history)
 
+
 @app.route('/upload', methods=['POST'])
 def upload():
-    file = request.files['file']
-    sender_ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
-  # Get sender's IP address
-    code = ''.join(random.choices(string.digits, k=6))
-    
-    original_filename = secure_filename(file.filename)  # Sanitize filename
-    filename = f"{code}_{original_filename}"
-    path = os.path.join(UPLOAD_FOLDER, filename)
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file part in request'}), 400
 
-    key = generate_key()
-    fernet = Fernet(key)
-    encrypted_data = fernet.encrypt(file.read())
+        file = request.files['file']
+        if file.filename == '' or file.filename is None:
+            return jsonify({'error': 'No file selected'}), 400
 
-    with open(path, 'wb') as f:
-        f.write(encrypted_data)
+        sender_ip = request.headers.get(
+            'X-Forwarded-For', request.remote_addr
+        ).split(',')[0].strip()
 
-    codes[code] = path
-    keys[code] = key
+        code = generate_code()
 
-    # Save upload history
-    history.append({
-        'sender_ip': sender_ip,
-        'receiver_ip': '',
-        'filename': filename
-    })
+        original_filename = secure_filename(file.filename)
+        if not original_filename:
+            original_filename = 'unnamed_file'
 
-    qr_code_url = generate_qr_code(code)
+        filename = f"{code}_{original_filename}"
+        path = os.path.join(UPLOAD_FOLDER, filename)
 
-    return jsonify({'code': code, 'qr_code_url': qr_code_url})
+        # Encrypt file data
+        key = Fernet.generate_key()
+        fernet = Fernet(key)
+        encrypted_data = fernet.encrypt(file.read())
+
+        with open(path, 'wb') as f:
+            f.write(encrypted_data)
+
+        # Store metadata
+        codes[code] = {
+            'path': path,
+            'key': key,
+            'created_at': time.time(),
+            'filename': original_filename,
+        }
+
+        history.append({
+            'sender_ip': sender_ip,
+            'receiver_ip': '',
+            'filename': original_filename,
+            'created_at': time.time(),
+        })
+
+        qr_code_url = generate_qr_code(code)
+
+        logger.info(f"File uploaded: {original_filename} (code: {code}) from {sender_ip}")
+        return jsonify({'code': code, 'qr_code_url': qr_code_url})
+
+    except Exception as e:
+        logger.error(f"Upload error: {e}", exc_info=True)
+        return jsonify({'error': 'Upload failed. Please try again.'}), 500
+
 
 @app.route('/download/<code>', methods=['GET'])
 def download(code):
-    path = codes.get(code)
-    key = keys.get(code)
-    receiver_ip = request.headers.get('X-Forwarded-For', request.remote_addr).split(',')[0].strip()
-  # Get receiver's IP address
+    info = codes.get(code)
 
-    if path and key and os.path.exists(path):
+    if not info:
+        return jsonify({'error': 'Invalid code or file expired.'}), 404
+
+    path = info['path']
+    key = info['key']
+
+    if not os.path.exists(path):
+        codes.pop(code, None)
+        return jsonify({'error': 'File not found. It may have expired.'}), 404
+
+    try:
         fernet = Fernet(key)
         with open(path, 'rb') as f:
             encrypted_data = f.read()
+        decrypted_data = fernet.decrypt(encrypted_data)
+    except Exception as e:
+        logger.error(f"Decryption failed for code {code}: {e}")
+        return jsonify({'error': 'Decryption failed.'}), 500
 
-        try:
-            decrypted_data = fernet.decrypt(encrypted_data)
-        except Exception as e:
-            return f"Decryption failed. Error: {str(e)}", 400
+    original_filename = info.get('filename', 'downloaded_file')
 
-        # Extract original filename
-        try:
-            _, original_filename = os.path.basename(path).split('_', 1)
-        except ValueError:
-            original_filename = "downloaded_file"
+    # Update history with receiver IP
+    receiver_ip = request.headers.get(
+        'X-Forwarded-For', request.remote_addr
+    ).split(',')[0].strip()
 
-        # Update history with receiver IP
-        for entry in history:
-            if entry['filename'] == os.path.basename(path) and entry['receiver_ip'] == '':
-                entry['receiver_ip'] = receiver_ip
+    for entry in history:
+        if entry['filename'] == original_filename and entry['receiver_ip'] == '':
+            entry['receiver_ip'] = receiver_ip
+            break
 
-        return send_file(
-            BytesIO(decrypted_data),
-            as_attachment=True,
-            download_name=original_filename,
-            mimetype='application/octet-stream'
-        )
+    logger.info(f"File downloaded: {original_filename} (code: {code}) by {receiver_ip}")
 
-    return "Invalid code or file expired.", 404
+    return send_file(
+        BytesIO(decrypted_data),
+        as_attachment=True,
+        download_name=original_filename,
+        mimetype='application/octet-stream'
+    )
+
 
 @app.route('/get_history', methods=['GET'])
 def get_history():
-    return jsonify(history)  
+    # Return sanitized history (strip code prefix from filenames)
+    safe_history = []
+    for entry in history:
+        safe_history.append({
+            'sender_ip': entry.get('sender_ip', ''),
+            'receiver_ip': entry.get('receiver_ip', ''),
+            'filename': entry.get('filename', ''),
+        })
+    return jsonify(safe_history)
 
-#contact info
+
 @app.route('/submit_contact', methods=['POST'])
 def submit_contact():
-    data = request.get_json()  # Accepts JSON payload
+    if contact_collection is None:
+        return jsonify({"message": "Contact form is currently unavailable."}), 503
+
+    data = request.get_json()
 
     if not data:
         return jsonify({"message": "Invalid data"}), 400
 
-    # Extract data from the JSON payload
-    name = data.get('name')
-    phone = data.get('phone')
-    email = data.get('email')
-    message = data.get('message')
+    name = data.get('name', '').strip()
+    phone = data.get('phone', '').strip()
+    email = data.get('email', '').strip()
+    message = data.get('message', '').strip()
 
     if not all([name, phone, email, message]):
         return jsonify({"message": "All fields are required"}), 400
 
-    # Insert data into MongoDB
-    contact_collection.insert_one({
-        "name": name,
-        "phone": phone,
-        "email": email,
-        "message": message
-    })
+    # Basic email validation
+    if '@' not in email or '.' not in email:
+        return jsonify({"message": "Invalid email address"}), 400
 
-    return jsonify({"message": "Contact submitted successfully"}), 200
+    try:
+        contact_collection.insert_one({
+            "name": name,
+            "phone": phone,
+            "email": email,
+            "message": message
+        })
+        logger.info(f"Contact form submitted by {name} ({email})")
+        return jsonify({"message": "Contact submitted successfully"}), 200
+    except Exception as e:
+        logger.error(f"Contact form error: {e}")
+        return jsonify({"message": "Submission failed. Please try again."}), 500
 
 
+# ---------------------------------------------------------------------------
+# Error handlers
+# ---------------------------------------------------------------------------
+
+@app.errorhandler(404)
+def not_found(e):
+    return jsonify({'error': 'Not found'}), 404
+
+
+@app.errorhandler(413)
+def file_too_large(e):
+    max_mb = int(os.environ.get('MAX_FILE_SIZE_MB', 100))
+    return jsonify({'error': f'File too large. Maximum size is {max_mb} MB.'}), 413
+
+
+@app.errorhandler(500)
+def server_error(e):
+    return jsonify({'error': 'Internal server error'}), 500
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=10000, debug=True)
+    debug = os.environ.get('FLASK_DEBUG', 'false').lower() == 'true'
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=debug, use_reloader=False)
