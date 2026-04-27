@@ -14,6 +14,7 @@ from werkzeug.utils import secure_filename
 from pymongo import MongoClient
 from dotenv import load_dotenv
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+import certifi
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -37,7 +38,7 @@ logger = logging.getLogger(__name__)
 MONGO_URI = os.environ.get('MONGO_URI')
 if MONGO_URI:
     try:
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
         db = client["nowshare_db"]
         contact_collection = db["contacts"]
         logger.info("MongoDB connected successfully.")
