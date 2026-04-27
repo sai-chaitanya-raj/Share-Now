@@ -13,13 +13,10 @@ import qrcode
 from werkzeug.utils import secure_filename
 from pymongo import MongoClient
 from dotenv import load_dotenv
-from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 import certifi
 
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-# Only load .env file in local development (Railway sets env vars directly)
+
 if os.path.exists('.env'):
     load_dotenv(dotenv_path='.env', override=False)
 
@@ -147,6 +144,20 @@ REQUEST_LATENCY = Histogram(
     ['method', 'endpoint']
 )
 
+ERROR_COUNT = Counter(
+    'flask_http_errors_total',
+    'Total HTTP errors (4xx and 5xx)',
+    ['method', 'endpoint', 'status']
+)
+
+# App info gauge — exposes version/name as labels (value is always 1)
+APP_INFO = Gauge(
+    'flask_app_info',
+    'Application metadata',
+    ['app_name', 'version']
+)
+APP_INFO.labels(app_name='nowshare', version='1.0.0').set(1)
+
 
 @app.before_request
 def _start_timer():
@@ -155,7 +166,7 @@ def _start_timer():
 
 @app.after_request
 def _record_metrics(response):
-    if request.path == '/metrics':  # Don't track the metrics endpoint itself
+    if request.path in ('/metrics', '/health'):  # Don't track internal endpoints
         return response
 
     latency = time.time() - getattr(request, '_prom_start_time', time.time())
@@ -172,6 +183,14 @@ def _record_metrics(response):
         endpoint=endpoint
     ).observe(latency)
 
+    # Track errors (4xx and 5xx)
+    if response.status_code >= 400:
+        ERROR_COUNT.labels(
+            method=request.method,
+            endpoint=endpoint,
+            status=response.status_code
+        ).inc()
+
     return response
 
 
@@ -179,6 +198,16 @@ def _record_metrics(response):
 def metrics():
     """Prometheus metrics endpoint."""
     return generate_latest(), 200, {'Content-Type': CONTENT_TYPE_LATEST}
+
+
+@app.route('/health')
+def health():
+    """Health check endpoint for Docker/Kubernetes."""
+    return jsonify({
+        'status': 'healthy',
+        'app': 'nowshare',
+        'version': '1.0.0'
+    }), 200
 
 
 # ---------------------------------------------------------------------------
