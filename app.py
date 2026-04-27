@@ -38,7 +38,15 @@ logger = logging.getLogger(__name__)
 MONGO_URI = os.environ.get('MONGO_URI')
 if MONGO_URI:
     try:
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
+        client = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=10000,
+            connectTimeoutMS=10000,
+            socketTimeoutMS=10000,
+            tlsCAFile=certifi.where(),
+            tlsAllowInvalidCertificates=True,
+            retryWrites=True
+        )
         db = client["nowshare_db"]
         contact_collection = db["contacts"]
         logger.info("MongoDB connected successfully.")
